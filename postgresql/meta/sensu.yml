@@ -1,1 +1,14 @@
-check: {}
+{%- from "postgresql/map.jinja" import server with context -%}
+check:
+  local_postgresql_server_proc:
+    command: "PATH=$PATH:/usr/lib64/nagios/plugins:/usr/lib/nagios/plugins check_procs -C postgres -u postgres -c 1:30"
+    interval: 60
+    occurrences: 1
+    subscribers:
+    - local-postgresql-server
+  local_postgresql_open_slots:
+    command: "PATH=$PATH:/srv/sensu/checks check_postgres_connections.pl 127.0.0.1 {{ (server.databases | last).name }} {{ ((server.databases | last).users | last).name  }} {{ ((server.databases | last).users | last).password }}"
+    interval: 60
+    occurrences: 1
+    subscribers:
+    - local-postgresql-server
