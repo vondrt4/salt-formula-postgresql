@@ -10,3 +10,15 @@ parameters:
         address: '0.0.0.0'
         port: 5432
         protocol: tcp
+      clients:
+      - 127.0.0.1
+#      databases:
+#      - name: 'template1'
+#        encoding: 'UTF8'
+#        locale: 'cs_CZ'
+#        users:
+#        - name: 'postgres'
+#          password: 'password'
+#          host: 'localhost'
+#          createdb: true
+#          rights: 'all privileges'
