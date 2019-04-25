@@ -1,39 +1,50 @@
 {%- from "postgresql/map.jinja" import server with context %}
+{%- from "postgresql/map.jinja" import cluster with context %}
 {%- if server.enabled %}
 
 postgresql_packages:
   pkg.installed:
+  {% if cluster.get("enabled", False) and cluster.get("mode") == "bdr" %}
+  - names: {{ server.bdr_pkgs }}
+  {% else %}
   - names: {{ server.pkgs }}
+  {% endif %}
+
+{%- if grains.os_family == "Debian" %}
 
 init_postgresql_cluster:
-  cmd.run:
-  - name: pg_createcluster {{ server.version }} main --start
-  - unless: "[ -f /etc/postgresql/{{ server.version }}/main/postgresql.conf ]"
-  - cwd: /root
+  postgres_cluster.present:
+  - name: main
+  - version: "{{ server.version }}"
+  - datadir: "{{ server.dir.data }}"
+  {%- if grains.get('noservices') %}
+  - onlyif: /bin/false
+  {%- endif %}
   - require:
     - pkg: postgresql_packages
+  - require_in:
+    - file: {{ server.dir.config }}/pg_hba.conf
+    - file: {{ server.dir.config }}/postgresql.conf
 
-/etc/postgresql/{{ server.version }}/main/pg_hba.conf:
+{{ server.dir.config }}/pg_hba.conf:
   file.managed:
   - source: salt://postgresql/files/pg_hba.conf
   - template: jinja
   - user: postgres
   - group: postgres
   - mode: 600
-  - require:
-    - pkg: postgresql_packages
 
-/etc/postgresql/{{ server.version }}/main/postgresql.conf:
+{{ server.dir.config }}/postgresql.conf:
   file.managed:
-  - source: salt://postgresql/files/{{ server.version }}/postgresql.conf
+  - source: salt://postgresql/files/{{ server.version }}/postgresql.conf.{{ grains.os_family }}
   - template: jinja
   - user: postgres
   - group: postgres
   - defaults:
     postgresql_version: {{ server.version }}
   - mode: 600
-  - require:
-    - pkg: postgresql_packages
+
+{%- endif %}
 
 /root/.pgpass:
   file.managed:
@@ -42,17 +53,64 @@ init_postgresql_cluster:
   - user: root
   - group: root
   - mode: 600
-  - require:
-    - pkg: postgresql_packages
+
+{%- if grains.os_family == "Debian" %}
 
 postgresql_service:
   service.running:
-  - name: postgresql
+  - name: {{ server.service }}
+  - enable: true
+  {%- if grains.get('noservices') %}
+  - onlyif: /bin/false
+  {%- endif %}
   - watch:
-    - file: /etc/postgresql/{{ server.version }}/main/pg_hba.conf
-    - file: /etc/postgresql/{{ server.version }}/main/postgresql.conf
+    - file: {{ server.dir.config }}/pg_hba.conf
+    - file: {{ server.dir.config }}/postgresql.conf
   - require:
     - file: /root/.pgpass
+
+{%- for database_name, database in server.get('database', {}).iteritems() %}
+  {%- include "postgresql/_database.sls" %}
+
+  {%- for extension_name, extension in database.get('extension', {}).iteritems() %}
+    {%- if extension.enabled %}
+    {%- if extension.get('pkgs', []) %}
+
+postgresql_{{ extension_name }}_extension_packages:
+  pkg.installed:
+  - names: {{ pkgs }}
+
+    {%- endif %}
+
+database_{{ database_name }}_{{ extension_name }}_extension_present:
+  postgres_extension.present:
+  - name: {{ extension_name }}
+  - maintenance_db: {{ database_name }}
+  - user: postgres
+  {%- if grains.get('noservices') %}
+  - onlyif: /bin/false
+  {%- endif %}
+  - require:
+    - postgres_database: postgresql_database_{{ database_name }}
+
+    {%- else %}
+
+database_{{ database_name }}_{{ extension_name }}_extension_absent:
+  postgres_extension.present:
+  - name: {{ extension_name }}
+  - maintenance_db: {{ database_name }}
+  - user: postgres
+  {%- if grains.get('noservices') %}
+  - onlyif: /bin/false
+  {%- endif %}
+  - require:
+    - postgres_database: postgresql_database_{{ database_name }}
+
+    {%- endif %}
+  {%- endfor %}
+{%- endfor %}
+
+{%- endif %}
 
 postgresql_dirs:
   file.directory:
@@ -68,140 +126,26 @@ postgresql_dirs:
   - require:
     - pkg: postgresql_packages
 
+{%- if server.initial_data is defined %}
 
-{%- for database in server.get('databases', []) %}
+{%- set engine = server.initial_data.get("engine", "barman") %}
 
-{%- for user in database.users %}
-
-postgresql_user_{{ database.name }}_{{ user.name }}:
-  postgres_user.present:
-  - name: {{ user.name }}
-  - user: postgres
-  {% if user.get('createdb', False) %}
-  - createdb: enabled
-  {% endif %}
-  - password: {{ user.password }}
-  - require:
-    - service: postgresql_service
-
-{%- endfor %}
-
-postgresql_database_{{ database.name }}:
-  postgres_database.present:
-  - name: {{ database.name }}
-  - encoding: {{ database.encoding }}
-  - user: postgres
-  - template: template0
-  - owner: {% for user in database.users %}{% if loop.first %}{{ user.name }}{% endif %}{% endfor %}
-  - require:
-    {%- for user in database.users %}
-    - postgres_user: postgresql_user_{{ database.name }}_{{ user.name }}
-    {%- endfor %}
-
-{% if database.initial_data is defined %}
-
-{%- set engine = database.initial_data.get("engine", "backupninja") %}
-
-/root/postgresql/scripts/restore_{{ database.name }}.sh:
+/root/postgresql/scripts/restore_wal.sh:
   file.managed:
-  - source: salt://postgresql/files/restore.sh
+  - source: salt://postgresql/files/restore_wal.sh
   - mode: 770
   - template: jinja
-  - defaults:
-    database_name: {{ database.name }}
-  - require: 
+  - require:
     - file: postgresql_dirs
-    - postgres_database: postgresql_database_{{ database.name }}
 
-restore_postgresql_database_{{ database.name }}:
+restore_postgresql_server:
   cmd.run:
-  - name: /root/postgresql/scripts/restore_{{ database.name }}.sh
-  - unless: "[ -f /root/postgresql/flags/{{ database.name }}-installed ]"
+  - name: /root/postgresql/scripts/restore_wal.sh
+  - unless: "[ -f /root/postgresql/flags/restore_wal-done ]"
   - cwd: /root
   - require:
-    - file: /root/postgresql/scripts/restore_{{ database.name }}.sh
-
-{% endif %}
-
-{%- endfor %}
-
-{%- for database_name, database in server.get('database', {}).iteritems() %}
-
-{%- for user in database.users %}
-
-postgresql_user_{{ database_name }}_{{ user.name }}:
-  postgres_user.present:
-  - name: {{ user.name }}
-  - user: postgres
-  {% if user.get('createdb', False) %}
-  - createdb: enabled
-  {% endif %}
-  - password: {{ user.password }}
-  - require:
-    - service: postgresql_service
-
-{%- endfor %}
-
-postgresql_database_{{ database_name }}:
-  postgres_database.present:
-  - name: {{ database_name }}
-  - encoding: {{ database.encoding }}
-  - user: postgres
-  - template: template0
-  - owner: {% for user in database.users %}{% if loop.first %}{{ user.name }}{% endif %}{% endfor %}
-  - require:
-    {%- for user in database.users %}
-    - postgres_user: postgresql_user_{{ database_name }}_{{ user.name }}
-    {%- endfor %}
-
-{%- if database.extension is defined %}
-
-postgresql_extensions_packages:
-  pkg.installed:
-  - names:
-    - postgresql-{{ server.version }}-postgis-2.1
-  - skip_suggestions: True
-  - skip_verify: True
+    - file: /root/postgresql/scripts/restore_wal.sh
 
 {%- endif %}
-
-{%- for extension_name, extension in database.get('extension', {}).iteritems() %}
-
-database_{{ database_name }}_{{ extension_name }}_extension:
-  postgres_extension.present:
-  - name: {{ extension_name }}
-  - maintenance_db: {{ database_name }}
-  - user: postgres
-  - template: template0
-  - require:
-    - postgres_database: postgresql_database_{{ database_name }}
-{%- endfor %}
-
-{% if database.initial_data is defined %}
-
-{%- set engine = database.initial_data.get("engine", "backupninja") %}
-
-/root/postgresql/scripts/restore_{{ database_name }}.sh:
-  file.managed:
-  - source: salt://postgresql/files/restore.sh
-  - mode: 770
-  - template: jinja
-  - defaults:
-    database_name: {{ database_name }}
-  - require: 
-    - file: postgresql_dirs
-    - postgres_database: postgresql_database_{{ database_name }}
-
-restore_postgresql_database_{{ database_name }}:
-  cmd.run:
-  - name: /root/postgresql/scripts/restore_{{ database_name }}.sh
-  - unless: "[ -f /root/postgresql/flags/{{ database_name }}-installed ]"
-  - cwd: /root
-  - require:
-    - file: /root/postgresql/scripts/restore_{{ database_name }}.sh
-
-{% endif %}
-
-{%- endfor %}
 
 {%- endif %}

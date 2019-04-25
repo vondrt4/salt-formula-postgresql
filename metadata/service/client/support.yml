@@ -2,12 +2,12 @@ parameters:
   postgresql:
     _support:
       backupninja:
-        enabled: true
+        enabled: false
       collectd:
         enabled: false
       heka:
         enabled: false
       sensu:
-        enabled: true
+        enabled: false
       sphinx:
         enabled: true

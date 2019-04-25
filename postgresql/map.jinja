@@ -1,15 +1,55 @@
-{%- set version = pillar.postgresql.server.get('version', '9.3') %}
+{%- set default_version = salt['grains.filter_by']({
+    'xenial': '9.5',
+    'trusty': '9.3',
+    'default': '9.5',
+}, grain='oscodename') %}
+
+{%- set version_uni = salt['pillar.get']('postgresql:server:version', default=default_version)|string %}
+{%- set version = version_uni.encode() %}
+{%- set version_numbers = version|replace('.', '') %}
 {%- set server = salt['grains.filter_by']({
     'Debian': {
-        'pkgs': ['postgresql-'+version, 'postgresql-contrib-'+version, 'libdbd-pg-perl'],
-        'service': 'postgres',
+        'pkgs': ['postgresql-' + version, 'postgresql-contrib-' + version, 'postgresql-doc-' + version],
+        'bdr_pkgs': ['sudo', 'postgresql-bdr-' + version + '-bdr-plugin', 'postgresql-bdr-' + version, 'postgresql-bdr-client-' + version, 'postgresql-bdr-contrib-' + version],
+        'service': 'postgresql',
         'version': version,
+        'init_command': 'pg_createcluster ' + version + ' main --start',
+        'dir': {
+          'config': '/etc/postgresql/' + version + '/main',
+          'data': '/var/lib/postgresql/' + version + '/main'
+        },
         'gis': False,
     },
     'RedHat': {
-        'pkgs': ['postgresql'+version|replace('.', '')+'-server'],
-        'service': 'postgres',
+        'pkgs': ['postgresql93-server', 'postgresql93-contrib'],
+        'service': 'postgresql-' + version,
         'version': version,
+        'init_command': 'service postgresql-9.3 initdb',
+        'dir': {
+          'config': '/var/lib/pgsql/9.3/data'
+        },
         'gis': False,
     },
 }, merge=salt['pillar.get']('postgresql:server')) %}
+
+{%- set cluster = salt['grains.filter_by']({
+    'Debian': {
+        'pkgs': [],
+        'service': 'postgresql',
+        'version': version,
+        'init_command': 'pg_createcluster ' + version + ' main --start',
+        'dir': {
+          'config': '/etc/postgresql/' + version + '/main',
+          'data': '/var/lib/postgresql/' + version + '/main'
+        },
+        'archive': "off",
+        'synchronous': False,
+        'wal_level': 'hot_standby'
+    }
+}, merge=salt['pillar.get']('postgresql:cluster')) %}
+
+{%- set client = salt['grains.filter_by']({
+    'Debian': {
+        'pkgs': ['postgresql-client'],
+    }
+}, merge=salt['pillar.get']('postgresql:client')) %}
